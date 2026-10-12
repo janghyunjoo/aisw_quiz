@@ -16,7 +16,7 @@
     --ok: #17804a;
     --ok-bg: #e5f5ec;
     --no: #c2362b;
-    --no-bg: #fdeceA;
+    --no-bg: #fdecea;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -82,9 +82,11 @@
   }
   .choice:hover:not(:disabled) { border-color: var(--accent); }
   .choice:disabled { cursor: default; }
+  .choice.picked { border-color: var(--accent); }
   .choice.correct { border-color: var(--ok); background: var(--ok-bg); }
   .choice.wrong { border-color: var(--no); background: var(--no-bg); }
   .feedback { margin-top: 16px; padding: 12px 14px; border-radius: 10px; font-size: 0.95rem; }
+  .feedback.wait { color: var(--muted); padding-left: 0; }
   .feedback.ok { background: var(--ok-bg); }
   .feedback.no { background: var(--no-bg); }
   .feedback strong { display: block; margin-bottom: 2px; }
@@ -103,6 +105,7 @@
     padding: 14px;
     cursor: pointer;
   }
+  .primary:disabled { opacity: .6; cursor: default; }
   .score { text-align: center; margin: 4px 0 6px; }
   .score b { font-size: 3rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
   .score span { color: var(--muted); font-size: 1.2rem; }
@@ -125,8 +128,7 @@
     padding: 13px 14px;
   }
   #password:focus { outline: none; border-color: var(--accent); }
-  .lock-msg { margin: 10px 0 0; color: var(--no); font-size: 0.92rem; }
-  .primary:disabled { opacity: .6; cursor: default; }
+  .msg { margin: 10px 0 0; color: var(--no); font-size: 0.92rem; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -140,7 +142,7 @@
   <form class="card" id="lock">
     <label class="question" for="password">비밀번호를 입력하세요</label>
     <input id="password" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-    <p class="lock-msg" id="lockMsg" hidden></p>
+    <p class="msg" id="lockMsg" hidden></p>
     <button class="primary" id="unlock" type="submit">시작하기</button>
   </form>
 
@@ -154,52 +156,60 @@
   </section>
 
   <section class="card" id="result" hidden>
-    <p class="score"><b id="scoreNum"></b><span> / 10</span></p>
+    <p class="score"><b id="scoreNum"></b><span id="scoreTotal"></span></p>
     <p class="verdict" id="verdict"></p>
     <button class="primary" id="restart">다시하기 (새로운 10문제)</button>
+    <p class="msg" id="restartMsg" hidden></p>
     <ul class="review" id="review"></ul>
   </section>
 </main>
 
-<script src="data.js"></script>
 <script>
-let BANK = null;
-
-const QUIZ_SIZE = 10;
+// 문제 출제와 채점은 구글 Apps Script 서버가 한다. 이 페이지에는 문제와 정답이 없다.
+const API_URL = "https://script.google.com/macros/s/AKfycbxUzeC9Artx9TIhc-XCL2lEYyAxMasMf0yiXmlyDOlkDnBtFWqWSjVQoDT0OTqYhOo-/exec";
 const $ = id => document.getElementById(id);
 
-let questions, index, score, answers;
+let password = "", token, questions, index, score, answers;
 
-function shuffle(arr) {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
+async function api(body) {
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ ...body, password })
+  });
+  return res.json();
 }
 
-function start() {
-  questions = shuffle(BANK).slice(0, QUIZ_SIZE).map(item => (
-    { q: item.q, e: item.e, choices: shuffle(item.c), answer: item.c[0] }
-  ));
+// 새 10문제를 받아 온다. 실패하면 사용자에게 보여 줄 문구를 돌려준다.
+async function load() {
+  let res;
+  try {
+    res = await api({ action: "start" });
+  } catch (err) {
+    return "서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+  }
+  if (res.error === "password") return "비밀번호가 맞지 않습니다.";
+  if (res.error || !res.questions || !res.questions.length) return "문제를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.";
+  token = res.token;
+  questions = res.questions;
   index = 0;
   score = 0;
   answers = [];
+  $("lock").hidden = true;
   $("result").hidden = true;
   $("quiz").hidden = false;
   show();
+  return null;
 }
 
 function show() {
   const item = questions[index];
-  $("count").textContent = `문제 ${index + 1} / ${QUIZ_SIZE}`;
+  $("count").textContent = `문제 ${index + 1} / ${questions.length}`;
   $("running").textContent = `정답 ${score}개`;
-  $("progress").style.width = `${(index / QUIZ_SIZE) * 100}%`;
+  $("progress").style.width = `${(index / questions.length) * 100}%`;
   $("question").textContent = item.q;
   $("feedback").hidden = true;
   $("next").hidden = true;
-
   $("choices").replaceChildren(...item.choices.map(text => {
     const btn = document.createElement("button");
     btn.className = "choice";
@@ -209,30 +219,46 @@ function show() {
   }));
 }
 
-function pick(btn, text) {
+async function pick(btn, text) {
   const item = questions[index];
-  const correct = text === item.answer;
-  if (correct) score++;
-  answers.push({ item, picked: text, correct });
-
-  for (const b of $("choices").children) {
-    b.disabled = true;
-    if (b.textContent === item.answer) b.classList.add("correct");
-  }
-  if (!correct) btn.classList.add("wrong");
-
+  const buttons = [...$("choices").children];
   const fb = $("feedback");
-  fb.className = "feedback " + (correct ? "ok" : "no");
-  fb.replaceChildren();
-  const head = document.createElement("strong");
-  head.textContent = correct ? "정답입니다" : `오답입니다 · 정답: ${item.answer}`;
-  fb.append(head, item.e);
+  buttons.forEach(b => b.disabled = true);
+  btn.classList.add("picked");
+  fb.className = "feedback wait";
+  fb.textContent = "채점 중…";
   fb.hidden = false;
 
+  let res = null;
+  try {
+    res = await api({ action: "answer", token, id: item.id, choice: text });
+  } catch (err) {}
+  if (!res || res.error) {
+    fb.className = "feedback no";
+    fb.textContent = res && res.error === "expired"
+      ? "시간이 오래 지나 이어서 풀 수 없습니다. 페이지를 새로고침해 주세요."
+      : "채점하지 못했습니다. 답을 다시 눌러 주세요.";
+    btn.classList.remove("picked");
+    buttons.forEach(b => b.disabled = false);
+    return;
+  }
+
+  if (res.correct) score++;
+  answers.push({ q: item.q, picked: text, correct: res.correct, answer: res.answer, e: res.e });
+  btn.classList.remove("picked");
+  buttons.forEach(b => { if (b.textContent === res.answer) b.classList.add("correct"); });
+  if (!res.correct) btn.classList.add("wrong");
+
+  fb.className = "feedback " + (res.correct ? "ok" : "no");
+  fb.replaceChildren();
+  const head = document.createElement("strong");
+  head.textContent = res.correct ? "정답입니다" : `오답입니다 · 정답: ${res.answer}`;
+  fb.append(head, res.e);
+
   $("running").textContent = `정답 ${score}개`;
-  $("progress").style.width = `${((index + 1) / QUIZ_SIZE) * 100}%`;
+  $("progress").style.width = `${((index + 1) / questions.length) * 100}%`;
   const next = $("next");
-  next.textContent = index + 1 < QUIZ_SIZE ? "다음 문제" : "결과 보기";
+  next.textContent = index + 1 < questions.length ? "다음 문제" : "결과 보기";
   next.hidden = false;
   next.focus();
 }
@@ -240,18 +266,20 @@ function pick(btn, text) {
 function finish() {
   $("quiz").hidden = true;
   $("scoreNum").textContent = score;
-  $("verdict").textContent = `${QUIZ_SIZE}문제 중 ${score}문제를 맞혔습니다.`;
+  $("scoreTotal").textContent = ` / ${questions.length}`;
+  $("verdict").textContent = `${questions.length}문제 중 ${score}문제를 맞혔습니다.`;
+  $("restartMsg").hidden = true;
   $("review").replaceChildren(...answers.map((a, i) => {
     const li = document.createElement("li");
     const mark = document.createElement("span");
     mark.className = "mark " + (a.correct ? "ok" : "no");
     mark.textContent = a.correct ? "O" : "X";
-    li.append(mark, `${i + 1}. ${a.item.q}`);
+    li.append(mark, `${i + 1}. ${a.q}`);
     const ans = document.createElement("p");
     ans.className = "ans";
-    ans.textContent = a.correct ? `정답: ${a.item.answer}` : `내 답: ${a.picked} / 정답: ${a.item.answer}`;
+    ans.textContent = a.correct ? `정답: ${a.answer}` : `내 답: ${a.picked} / 정답: ${a.answer}`;
     const exp = document.createElement("p");
-    exp.textContent = a.item.e;
+    exp.textContent = a.e;
     li.append(ans, exp);
     return li;
   }));
@@ -259,56 +287,31 @@ function finish() {
   window.scrollTo(0, 0);
 }
 
-$("next").addEventListener("click", () => {
-  index++;
-  if (index < QUIZ_SIZE) show(); else finish();
-});
-$("restart").addEventListener("click", start);
-
-// 문제 은행은 data.js에 암호화되어 있고, 비밀번호로만 풀린다
-async function decryptBank(password) {
-  const d = window.QUIZ_DATA;
-  const bytes = s => Uint8Array.from(atob(s), ch => ch.charCodeAt(0));
-  const pw = new TextEncoder().encode(password.trim().normalize("NFC"));
-  const base = await crypto.subtle.importKey("raw", pw, "PBKDF2", false, ["deriveBits"]);
-  const bits = new Uint8Array(await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-512", salt: bytes(d.salt), iterations: d.iter }, base, 512));
-  const iv = bytes(d.iv), ct = bytes(d.ct);
-  const signed = new Uint8Array(iv.length + ct.length);
-  signed.set(iv);
-  signed.set(ct, iv.length);
-  const macKey = await crypto.subtle.importKey("raw", bits.slice(32), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  if (!await crypto.subtle.verify("HMAC", macKey, bytes(d.mac), signed)) return null;
-  const encKey = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-CBC", false, ["decrypt"]);
-  const plain = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, encKey, ct);
-  return JSON.parse(new TextDecoder().decode(plain));
-}
-
-$("lock").addEventListener("submit", async ev => {
-  ev.preventDefault();
-  const msg = $("lockMsg"), btn = $("unlock");
+// 버튼을 잠그고 새 문제를 불러온 뒤, 실패 문구가 있으면 msg에 보여 준다
+async function loadWith(btn, msg, busyText) {
+  const label = btn.textContent;
   msg.hidden = true;
   btn.disabled = true;
-  btn.textContent = "확인 중…";
-  let bank = null, failed = false;
-  try {
-    bank = await decryptBank($("password").value);
-  } catch (err) {
-    failed = true;
-  }
+  btn.textContent = busyText;
+  const error = await load();
   btn.disabled = false;
-  btn.textContent = "시작하기";
-  if (!bank) {
-    msg.textContent = failed || !window.QUIZ_DATA
-      ? "문제를 불러오지 못했습니다. 잠시 후 새로고침해 주세요."
-      : "비밀번호가 맞지 않습니다.";
+  btn.textContent = label;
+  if (error) {
+    msg.textContent = error;
     msg.hidden = false;
-    $("password").select();
-    return;
   }
-  BANK = bank;
-  $("lock").hidden = true;
-  start();
+  return !error;
+}
+
+$("next").addEventListener("click", () => {
+  index++;
+  if (index < questions.length) show(); else finish();
+});
+$("restart").addEventListener("click", () => loadWith($("restart"), $("restartMsg"), "불러오는 중…"));
+$("lock").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  password = $("password").value.trim();
+  if (!await loadWith($("unlock"), $("lockMsg"), "확인 중…")) $("password").select();
 });
 $("password").focus();
 </script>

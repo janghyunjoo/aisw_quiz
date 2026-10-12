@@ -9,5 +9,7 @@
 
 # 암호화 전 문제 원본과 비밀번호 변경 도구는 PC에만 둔다
 questions.json
+server-version/
 set-password.ps1
 *.bat
+old-encrypted-version/
